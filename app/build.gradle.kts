@@ -4,6 +4,7 @@ plugins {
 }
 
 
+
 android {
     namespace = "id.go.beltim.familytrack"
     compileSdk = 35
