@@ -4,8 +4,11 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.location.Location
 import android.location.LocationManager
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.widget.Button
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
@@ -15,28 +18,26 @@ import androidx.core.content.ContextCompat
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
-import java.util.UUID
 import kotlin.concurrent.thread
 
 class MainActivity : ComponentActivity() {
     companion object {
         private const val LOCATION_PERMISSION_REQUEST = 1001
-
-        // Ganti dengan endpoint API Laravel yang benar-benar tersedia.
-        // Jangan gunakan URL ini sebelum route/controller API dibuat dan diuji.
-        private const val API_URL = "https://raperda.dprd.beltim.go.id/api/familytrack/location"
+        private const val API_BASE = "https://raperda.dprd.beltim.go.id/api/familytrack"
+        private const val PREFS = "familytrack_secure_prefs"
+        private const val KEY_DEVICE_TOKEN = "device_token"
     }
 
     private lateinit var statusText: TextView
     private lateinit var locationText: TextView
+    private lateinit var inviteInput: EditText
     private var latestLocation: Location? = null
+
+    private val deviceToken: String
+        get() = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_DEVICE_TOKEN, "").orEmpty()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(40, 48, 40, 40)
@@ -50,10 +51,18 @@ class MainActivity : ComponentActivity() {
             text = "Pelacak lokasi keluarga"
             textSize = 16f
         }
+        inviteInput = EditText(this).apply {
+            hint = "Masukkan token undangan"
+            singleLine = true
+        }
+        val registerButton = Button(this).apply {
+            text = "Daftarkan Perangkat"
+            setOnClickListener { registerDevice() }
+        }
         statusText = TextView(this).apply {
-            text = "Status: siap"
+            text = if (deviceToken.isNotBlank()) "Status: perangkat sudah terdaftar." else "Status: belum terdaftar. Masukkan token undangan."
             textSize = 16f
-            setPadding(0, 32, 0, 16)
+            setPadding(0, 24, 0, 16)
         }
         locationText = TextView(this).apply {
             text = "Lokasi belum dibaca"
@@ -68,19 +77,54 @@ class MainActivity : ComponentActivity() {
             text = "Kirim Lokasi ke Server"
             setOnClickListener { sendLocation() }
         }
-        val note = TextView(this).apply {
-            text = "Catatan: pengiriman membutuhkan endpoint API Laravel yang valid."
-            textSize = 13f
-            setPadding(0, 24, 0, 0)
-        }
         root.addView(title)
         root.addView(subtitle)
+        root.addView(inviteInput)
+        root.addView(registerButton)
         root.addView(statusText)
         root.addView(locationText)
         root.addView(getLocationButton)
         root.addView(sendButton)
-        root.addView(note)
         setContentView(root)
+    }
+
+    private fun registerDevice() {
+        val invite = inviteInput.text.toString().trim()
+        if (invite.isBlank()) {
+            inviteInput.error = "Token undangan wajib diisi"
+            return
+        }
+        statusText.text = "Mendaftarkan perangkat..."
+        thread {
+            try {
+                val payload = JSONObject().apply {
+                    put("agree", "1")
+                    put("device_name", Build.MODEL ?: "Android")
+                }
+                val path = "/register/" + Uri.encode(invite)
+                val (code, body) = postJson(path, payload, null)
+                val response = JSONObject(body.ifBlank { "{}" })
+                if (code in 200..299 && response.optBoolean("success")) {
+                    val token = response.optString("device_token")
+                    if (token.isBlank()) {
+                        runOnUiThread { statusText.text = "Registrasi gagal: server tidak mengirim device_token." }
+                        return@thread
+                    }
+                    getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_DEVICE_TOKEN, token).apply()
+                    val member = response.optJSONObject("member")?.optString("nama").orEmpty()
+                    val suffix = if (member.isNotBlank()) " untuk $member" else ""
+                    runOnUiThread {
+                        statusText.text = "Perangkat berhasil didaftarkan$suffix. Siap mengirim lokasi."
+                        Toast.makeText(this, "Registrasi berhasil.", Toast.LENGTH_LONG).show()
+                    }
+                } else {
+                    val message = response.optString("message").ifBlank { "HTTP $code" }
+                    runOnUiThread { statusText.text = "Registrasi gagal: $message (HTTP $code)" }
+                }
+            } catch (e: Exception) {
+                runOnUiThread { statusText.text = "Gagal registrasi: ${e.message ?: "koneksi bermasalah"}" }
+            }
+        }
     }
 
     private fun requestOrReadLocation() {
@@ -97,11 +141,7 @@ class MainActivity : ComponentActivity() {
         readLocation()
     }
 
-    override fun onRequestPermissionsResult(
-        requestCode: Int,
-        permissions: Array<out String>,
-        grantResults: IntArray
-    ) {
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == LOCATION_PERMISSION_REQUEST && grantResults.any { it == PackageManager.PERMISSION_GRANTED }) {
             readLocation()
@@ -137,42 +177,56 @@ class MainActivity : ComponentActivity() {
             Toast.makeText(this, "Ambil lokasi terlebih dahulu.", Toast.LENGTH_SHORT).show()
             return
         }
+        if (deviceToken.isBlank()) {
+            statusText.text = "Perangkat belum terdaftar. Masukkan token undangan dan daftarkan perangkat terlebih dahulu."
+            return
+        }
         statusText.text = "Mengirim lokasi..."
         thread {
-            var connection: HttpURLConnection? = null
             try {
                 val payload = JSONObject().apply {
-                    put("device_id", UUID.nameUUIDFromBytes(android.provider.Settings.Secure.getString(contentResolver, android.provider.Settings.Secure.ANDROID_ID).toByteArray()).toString())
                     put("latitude", loc.latitude)
                     put("longitude", loc.longitude)
                     put("accuracy", loc.accuracy)
-                    put("recorded_at", SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", Locale.US).format(Date(loc.time)))
+                    if (loc.hasSpeed()) put("speed", loc.speed)
+                    if (loc.hasBearing()) put("heading", loc.bearing)
                 }
-                connection = (URL(API_URL).openConnection() as HttpURLConnection).apply {
-                    requestMethod = "POST"
-                    connectTimeout = 15000
-                    readTimeout = 15000
-                    doOutput = true
-                    setRequestProperty("Content-Type", "application/json; charset=utf-8")
-                    setRequestProperty("Accept", "application/json")
-                }
-                connection.outputStream.use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
-                val code = connection.responseCode
-                val body = (if (code in 200..299) connection.inputStream else connection.errorStream)
-                    ?.bufferedReader()?.use { it.readText() }.orEmpty()
+                val (code, body) = postJson("/location", payload, deviceToken)
+                val response = JSONObject(body.ifBlank { "{}" })
+                val message = response.optString("message").ifBlank { "HTTP $code" }
                 runOnUiThread {
-                    statusText.text = if (code in 200..299) {
-                        "Lokasi terkirim (HTTP $code)."
+                    statusText.text = if (code in 200..299 && response.optBoolean("success")) {
+                        "Lokasi berhasil dikirim ke server."
                     } else {
-                        "Server menolak permintaan (HTTP $code). Periksa endpoint API."
+                        "Pengiriman gagal: $message (HTTP $code)"
                     }
-                    if (body.isNotBlank()) Toast.makeText(this, body.take(180), Toast.LENGTH_LONG).show()
+                    if (body.isNotBlank()) Toast.makeText(this, message, Toast.LENGTH_LONG).show()
                 }
             } catch (e: Exception) {
                 runOnUiThread { statusText.text = "Gagal mengirim: ${e.message ?: "koneksi bermasalah"}" }
-            } finally {
-                connection?.disconnect()
             }
+        }
+    }
+
+    private fun postJson(path: String, payload: JSONObject, bearerToken: String?): Pair<Int, String> {
+        val connection = URL(API_BASE + path).openConnection() as HttpURLConnection
+        try {
+            connection.requestMethod = "POST"
+            connection.connectTimeout = 20000
+            connection.readTimeout = 20000
+            connection.doOutput = true
+            connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+            connection.setRequestProperty("Accept", "application/json")
+            if (!bearerToken.isNullOrBlank()) {
+                connection.setRequestProperty("Authorization", "Bearer $bearerToken")
+            }
+            connection.outputStream.use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
+            val code = connection.responseCode
+            val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+            val body = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+            return Pair(code, body)
+        } finally {
+            connection.disconnect()
         }
     }
 }
