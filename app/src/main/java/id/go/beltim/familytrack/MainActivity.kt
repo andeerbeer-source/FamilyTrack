@@ -27,7 +27,7 @@ class MainActivity : ComponentActivity() {
 
         // Ganti dengan endpoint API Laravel yang benar-benar tersedia.
         // Jangan gunakan URL ini sebelum route/controller API dibuat dan diuji.
-        private const val API_URL = "https://raperda.dprd.beltim.go.id/api/gps/location"
+        private const val API_URL = "https://raperda.dprd.beltim.go.id/api/familytrack/location"
     }
 
     private lateinit var statusText: TextView
