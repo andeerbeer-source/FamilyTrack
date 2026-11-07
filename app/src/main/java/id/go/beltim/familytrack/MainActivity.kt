@@ -53,7 +53,7 @@ class MainActivity : ComponentActivity() {
         }
         inviteInput = EditText(this).apply {
             hint = "Masukkan token undangan"
-            singleLine = true
+            setSingleLine(true)
         }
         val registerButton = Button(this).apply {
             text = "Daftarkan Perangkat"
