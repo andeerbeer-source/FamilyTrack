@@ -1,6 +1,7 @@
 package id.go.beltim.familytrack
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.location.Location
 import android.location.LocationManager
@@ -23,6 +24,7 @@ import kotlin.concurrent.thread
 class MainActivity : ComponentActivity() {
     companion object {
         private const val LOCATION_PERMISSION_REQUEST = 1001
+        private const val NOTIFICATION_PERMISSION_REQUEST = 1002
         private const val API_BASE = "https://raperda.dprd.beltim.go.id/api/familytrack"
         private const val PREFS = "familytrack_secure_prefs"
         private const val KEY_DEVICE_TOKEN = "device_token"
@@ -32,6 +34,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var locationText: TextView
     private lateinit var inviteInput: EditText
     private var latestLocation: Location? = null
+    private var pendingStartTracking = false
 
     private val deviceToken: String
         get() = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_DEVICE_TOKEN, "").orEmpty()
@@ -67,7 +70,7 @@ class MainActivity : ComponentActivity() {
         locationText = TextView(this).apply {
             text = "Lokasi belum dibaca"
             textSize = 15f
-            setPadding(0, 0, 0, 24)
+            setPadding(0, 0, 0, 16)
         }
         val getLocationButton = Button(this).apply {
             text = "Ambil Lokasi"
@@ -77,6 +80,15 @@ class MainActivity : ComponentActivity() {
             text = "Kirim Lokasi ke Server"
             setOnClickListener { sendLocation() }
         }
+        val startTrackingButton = Button(this).apply {
+            text = "MULAI PELACAKAN OTOMATIS"
+            setOnClickListener { requestStartTracking() }
+        }
+        val stopTrackingButton = Button(this).apply {
+            text = "HENTIKAN PELACAKAN"
+            setOnClickListener { stopTracking() }
+        }
+
         root.addView(title)
         root.addView(subtitle)
         root.addView(inviteInput)
@@ -85,6 +97,8 @@ class MainActivity : ComponentActivity() {
         root.addView(locationText)
         root.addView(getLocationButton)
         root.addView(sendButton)
+        root.addView(startTrackingButton)
+        root.addView(stopTrackingButton)
         setContentView(root)
     }
 
@@ -128,9 +142,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun requestOrReadLocation() {
-        val fine = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
-        val coarse = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION)
-        if (fine != PackageManager.PERMISSION_GRANTED && coarse != PackageManager.PERMISSION_GRANTED) {
+        if (!hasLocationPermission()) {
             ActivityCompat.requestPermissions(
                 this,
                 arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION),
@@ -141,12 +153,89 @@ class MainActivity : ComponentActivity() {
         readLocation()
     }
 
+    private fun requestStartTracking() {
+        if (deviceToken.isBlank()) {
+            statusText.text = "Daftarkan perangkat terlebih dahulu menggunakan token undangan."
+            return
+        }
+        if (!hasLocationPermission()) {
+            pendingStartTracking = true
+            ActivityCompat.requestPermissions(
+                this,
+                arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION),
+                LOCATION_PERMISSION_REQUEST
+            )
+            return
+        }
+        requestNotificationPermissionThenStart()
+    }
+
+    private fun requestNotificationPermissionThenStart() {
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            pendingStartTracking = true
+            ActivityCompat.requestPermissions(
+                this,
+                arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                NOTIFICATION_PERMISSION_REQUEST
+            )
+            return
+        }
+        startLocationService()
+    }
+
+    private fun startLocationService() {
+        if (deviceToken.isBlank()) {
+            statusText.text = "Token perangkat tidak ditemukan. Daftarkan ulang perangkat."
+            return
+        }
+        val intent = Intent(this, LocationTrackingService::class.java).apply {
+            action = LocationTrackingService.ACTION_START
+        }
+        try {
+            ContextCompat.startForegroundService(this, intent)
+            statusText.text = "Pelacakan otomatis aktif. Notifikasi FamilyTrack akan tetap tampil."
+            Toast.makeText(this, "Pelacakan otomatis dimulai.", Toast.LENGTH_LONG).show()
+        } catch (e: Exception) {
+            statusText.text = "Tidak dapat memulai pelacakan: ${e.message ?: "periksa izin lokasi"}"
+        }
+    }
+
+    private fun stopTracking() {
+        val intent = Intent(this, LocationTrackingService::class.java).apply {
+            action = LocationTrackingService.ACTION_STOP
+        }
+        startService(intent)
+        statusText.text = "Perintah menghentikan pelacakan telah dikirim."
+    }
+
+    private fun hasLocationPermission(): Boolean {
+        val fine = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
+        val coarse = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION)
+        return fine == PackageManager.PERMISSION_GRANTED || coarse == PackageManager.PERMISSION_GRANTED
+    }
+
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == LOCATION_PERMISSION_REQUEST && grantResults.any { it == PackageManager.PERMISSION_GRANTED }) {
-            readLocation()
-        } else if (requestCode == LOCATION_PERMISSION_REQUEST) {
-            statusText.text = "Izin lokasi ditolak."
+        if (requestCode == LOCATION_PERMISSION_REQUEST) {
+            val granted = grantResults.any { it == PackageManager.PERMISSION_GRANTED }
+            if (granted) {
+                if (pendingStartTracking) {
+                    pendingStartTracking = false
+                    requestNotificationPermissionThenStart()
+                } else {
+                    readLocation()
+                }
+            } else {
+                pendingStartTracking = false
+                statusText.text = "Izin lokasi ditolak. Pelacakan tidak dapat berjalan."
+            }
+        } else if (requestCode == NOTIFICATION_PERMISSION_REQUEST) {
+            pendingStartTracking = false
+            // Android tetap dapat menjalankan foreground service jika notifikasi ditolak,
+            // tetapi pengguna sebaiknya mengizinkan notifikasi agar status layanan terlihat.
+            startLocationService()
         }
     }
 
